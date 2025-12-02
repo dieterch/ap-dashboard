@@ -1,6 +1,6 @@
 ## ✅ Debian 13 WLAN Access Point unter Proxmox
 
-**🧱 1. Voraussetzungen**
+🧱 1. Voraussetzungen
 **Hardware**
 * Proxmox Host
 * USB-WLAN-Adapter (z. B. Realtek RTL88x2BU oder ähnlich)
