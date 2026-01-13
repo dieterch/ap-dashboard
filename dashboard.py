@@ -2,6 +2,8 @@
 import subprocess
 import http.client
 import json
+import ipaddress
+
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, RedirectResponse
 from jinja2 import Template
@@ -22,6 +24,7 @@ def kick_client(mac):
     except:
         return False
 
+
 @app.get("/kick/{mac}")
 def kick_endpoint(mac: str):
     kick_client(mac)
@@ -35,7 +38,7 @@ def get_shelly_name(ip):
     if not ip or ip == "-" or ip is None:
         return None
 
-    # Gen2/Plus RPC
+    # Gen2 / Plus RPC
     try:
         conn = http.client.HTTPConnection(ip, timeout=0.5)
         conn.request("GET", "/rpc/Shelly.GetDeviceInfo")
@@ -53,6 +56,7 @@ def get_shelly_name(ip):
         res = conn.getresponse()
         if res.status == 200:
             data = json.loads(res.read().decode())
+
             if data.get("name"):
                 return data["name"]
 
@@ -119,6 +123,18 @@ def get_leases():
 
 
 # ------------------------------------------------------------
+# Helper: IP sort key
+# ------------------------------------------------------------
+def ip_sort_key(client):
+    ip = client.get("ip")
+    try:
+        return (0, ipaddress.IPv4Address(ip))
+    except:
+        # Geräte ohne IP ans Ende
+        return (1, None)
+
+
+# ------------------------------------------------------------
 # Dashboard
 # ------------------------------------------------------------
 @app.get("/", response_class=HTMLResponse)
@@ -129,6 +145,7 @@ def dashboard():
     for c in stas:
         mac = c["mac"].lower()
         lease = leases.get(mac, {})
+
         ip = lease.get("ip", "-")
         hostname = lease.get("hostname", "-")
 
@@ -137,6 +154,9 @@ def dashboard():
 
         c["ip"] = ip
         c["hostname"] = final_name
+
+    # 🔽 SORTIERUNG NACH IP
+    stas.sort(key=ip_sort_key)
 
     html = Template("""
     <!DOCTYPE html>
@@ -159,8 +179,8 @@ def dashboard():
                         <th>MAC</th>
                         <th>IP</th>
                         <th>Device Name</th>
-                        <th>Web</th>
-                        <th>Kick</th>
+                        <th class="text-center">Web</th>
+                        <th class="text-center">Kick</th>
                         <th>Signal (dBm)</th>
                         <th>RX</th>
                         <th>TX</th>
@@ -176,8 +196,9 @@ def dashboard():
 
                         <td class="text-center">
                             {% if c.ip != "-" %}
-                                <a class="btn btn-outline-primary btn-sm" 
-                                   href="http://{{ c.ip }}" target="_blank" 
+                                <a class="btn btn-outline-primary btn-sm"
+                                   href="http://{{ c.ip }}"
+                                   target="_blank"
                                    title="Open Web UI">
                                     <i class="bi bi-box-arrow-up-right"></i>
                                 </a>
