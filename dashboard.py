@@ -32,44 +32,39 @@ def kick_endpoint(mac: str):
 
 
 # ------------------------------------------------------------
-# Shelly Name Resolution
+# Shelly RPC helper
 # ------------------------------------------------------------
-def get_shelly_name(ip):
-    if not ip or ip == "-" or ip is None:
-        return None
-
-    # Gen2 / Plus RPC
+def shelly_rpc(host, path):
     try:
-        conn = http.client.HTTPConnection(ip, timeout=0.5)
-        conn.request("GET", "/rpc/Shelly.GetDeviceInfo")
+        conn = http.client.HTTPConnection(host, timeout=0.7)
+        conn.request("GET", path)
         res = conn.getresponse()
         if res.status == 200:
-            data = json.loads(res.read().decode())
-            return data.get("name") or data.get("id")
+            return json.loads(res.read().decode())
     except:
         pass
-
-    # Gen1 /settings
-    try:
-        conn = http.client.HTTPConnection(ip, timeout=0.5)
-        conn.request("GET", "/settings")
-        res = conn.getresponse()
-        if res.status == 200:
-            data = json.loads(res.read().decode())
-
-            if data.get("name"):
-                return data["name"]
-
-            dev = data.get("device", {})
-            if dev.get("hostname"):
-                return dev["hostname"]
-
-            if dev.get("type") and dev.get("mac"):
-                return f"{dev['type']}-{dev['mac'][-6:]}"
-    except:
-        pass
-
     return None
+
+
+def get_shelly_name_via(host):
+    data = shelly_rpc(host, "/rpc/Shelly.GetDeviceInfo")
+    if data:
+        return data.get("name") or data.get("id")
+    return None
+
+
+def is_range_extender(ip):
+    data = shelly_rpc(ip, "/rpc/WiFi.GetConfig")
+    if not data:
+        return False
+    return data.get("ap", {}).get("range_extender", {}).get("enable", False)
+
+
+def get_extender_clients(ip):
+    data = shelly_rpc(ip, "/rpc/WiFi.ListAPClients")
+    if not data:
+        return []
+    return data.get("ap_clients", [])
 
 
 # ------------------------------------------------------------
@@ -82,7 +77,7 @@ def get_sta():
         text=True
     ).stdout
 
-    macs = [line.strip() for line in result.splitlines() if ":" in line]
+    macs = [l.strip() for l in result.splitlines() if ":" in l]
     clients = []
 
     for mac in macs:
@@ -96,7 +91,7 @@ def get_sta():
 
         for line in detail.splitlines():
             if "=" in line:
-                k, v = line.strip().split("=", 1)
+                k, v = line.split("=", 1)
                 sta[k] = v
 
         clients.append(sta)
@@ -113,24 +108,16 @@ def get_leases():
         with open("/var/lib/misc/dnsmasq.leases") as f:
             for l in f:
                 _, mac, ip, hostname, _ = l.strip().split(" ")
-                leases[mac.lower()] = {
-                    "ip": ip,
-                    "hostname": hostname if hostname else "-"
-                }
+                leases[mac.lower()] = {"ip": ip, "hostname": hostname}
     except:
         pass
     return leases
 
 
-# ------------------------------------------------------------
-# Helper: IP sort key
-# ------------------------------------------------------------
-def ip_sort_key(client):
-    ip = client.get("ip")
+def ip_sort_key(c):
     try:
-        return (0, ipaddress.IPv4Address(ip))
+        return (0, ipaddress.IPv4Address(c["ip"].split(":")[0]))
     except:
-        # Geräte ohne IP ans Ende
         return (1, None)
 
 
@@ -141,92 +128,102 @@ def ip_sort_key(client):
 def dashboard():
     stas = get_sta()
     leases = get_leases()
+    rows = []
 
     for c in stas:
         mac = c["mac"].lower()
         lease = leases.get(mac, {})
-
         ip = lease.get("ip", "-")
-        hostname = lease.get("hostname", "-")
 
-        shelly_name = get_shelly_name(ip)
-        final_name = shelly_name or hostname or "Unknown"
+        name = get_shelly_name_via(ip) or lease.get("hostname", "-")
 
-        c["ip"] = ip
-        c["hostname"] = final_name
+        c.update({
+            "ip": ip,
+            "hostname": name,
+            "type": "sta"
+        })
 
-    # 🔽 SORTIERUNG NACH IP
-    stas.sort(key=ip_sort_key)
+        rows.append(c)
+
+        # ----- Extender clients -----
+        if ip != "-" and is_range_extender(ip):
+            for cl in get_extender_clients(ip):
+                host = f"{ip}:{cl['mport']}"
+                cname = get_shelly_name_via(host) or "Shelly Client"
+
+                rows.append({
+                    "mac": cl["mac"],
+                    "ip": host,
+                    "hostname": f"↳ {cname}",
+                    "signal": "",
+                    "rx_bytes": "",
+                    "tx_bytes": "",
+                    "connected_time": cl["since"],
+                    "type": "ext"
+                })
+
+    rows.sort(key=ip_sort_key)
 
     html = Template("""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <meta http-equiv="refresh" content="5"/>
-        <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
-        <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.1/font/bootstrap-icons.css" rel="stylesheet">
-        <title>AP Dashboard</title>
-    </head>
-    <body class="bg-light">
+<!DOCTYPE html>
+<html>
+<head>
+<meta http-equiv="refresh" content="5"/>
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+<link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.1/font/bootstrap-icons.css" rel="stylesheet">
+<title>AP Dashboard</title>
+</head>
+<body class="bg-light">
+<div class="container py-4">
+<h2>Access Point Dashboard</h2>
 
-        <div class="container py-4">
-            <h2 class="mb-3">Access Point Dashboard</h2>
-            <p class="text-muted">Automatische Aktualisierung alle 5 Sekunden</p>
+<table class="table table-striped table-hover align-middle">
+<thead class="table-dark">
+<tr>
+<th>MAC</th>
+<th>Access</th>
+<th>Device Name</th>
+<th class="text-center">Web</th>
+<th class="text-center">Kick</th>
+<th>Signal</th>
+<th>RX</th>
+<th>TX</th>
+<th>Uptime</th>
+</tr>
+</thead>
+<tbody>
+{% for c in clients %}
+<tr class="{% if c.type == 'ext' %}table-secondary{% endif %}">
+<td>{{ c.mac }}</td>
+<td>{{ c.ip }}</td>
+<td>{{ c.hostname }}</td>
 
-            <table class="table table-striped table-hover align-middle">
-                <thead class="table-dark">
-                    <tr>
-                        <th>MAC</th>
-                        <th>IP</th>
-                        <th>Device Name</th>
-                        <th class="text-center">Web</th>
-                        <th class="text-center">Kick</th>
-                        <th>Signal (dBm)</th>
-                        <th>RX</th>
-                        <th>TX</th>
-                        <th>Uptime (s)</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {% for c in clients %}
-                    <tr>
-                        <td>{{ c.mac }}</td>
-                        <td>{{ c.ip }}</td>
-                        <td>{{ c.hostname }}</td>
+<td class="text-center">
+<a class="btn btn-outline-primary btn-sm"
+   href="http://{{ c.ip }}" target="_blank">
+<i class="bi bi-box-arrow-up-right"></i>
+</a>
+</td>
 
-                        <td class="text-center">
-                            {% if c.ip != "-" %}
-                                <a class="btn btn-outline-primary btn-sm"
-                                   href="http://{{ c.ip }}"
-                                   target="_blank"
-                                   title="Open Web UI">
-                                    <i class="bi bi-box-arrow-up-right"></i>
-                                </a>
-                            {% else %}
-                                -
-                            {% endif %}
-                        </td>
+<td class="text-center">
+{% if c.type == 'sta' %}
+<a class="btn btn-outline-danger btn-sm" href="/kick/{{ c.mac }}">
+<i class="bi bi-x-circle"></i>
+</a>
+{% endif %}
+</td>
 
-                        <td class="text-center">
-                            <a class="btn btn-outline-danger btn-sm"
-                               href="/kick/{{ c.mac }}"
-                               title="Kick device">
-                               <i class="bi bi-x-circle"></i>
-                            </a>
-                        </td>
+<td>{{ c.signal }}</td>
+<td>{{ c.rx_bytes }}</td>
+<td>{{ c.tx_bytes }}</td>
+<td>{{ c.connected_time }}</td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
+</div>
+</body>
+</html>
+""")
 
-                        <td>{{ c.signal }}</td>
-                        <td>{{ c.rx_bytes }}</td>
-                        <td>{{ c.tx_bytes }}</td>
-                        <td>{{ c.connected_time }}</td>
-                    </tr>
-                    {% endfor %}
-                </tbody>
-            </table>
-        </div>
-
-    </body>
-    </html>
-    """)
-
-    return html.render(clients=stas)
+    return html.render(clients=rows)
