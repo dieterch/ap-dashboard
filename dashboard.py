@@ -230,7 +230,11 @@ def dashboard():
 </head>
 <script>
 setInterval(() => {
-  if (!document.querySelector(":focus")) {
+  const pause = document.getElementById("pause-refresh");
+  const isPaused = pause && pause.checked;
+  const hasFocus = document.querySelector(":focus");
+
+  if (!isPaused && !hasFocus) {
     window.location.reload();
   }
 }, 5000);
@@ -238,6 +242,12 @@ setInterval(() => {
 <body class="bg-light">
 <div class="container py-4">
 <h2>Access Point Dashboard</h2>
+<div class="form-check form-switch mb-3">
+  <input class="form-check-input" type="checkbox" id="pause-refresh">
+  <label class="form-check-label" for="pause-refresh">
+    Pause updates while editing
+  </label>
+</div>
 
 <form class="row g-2 mb-3" method="post" action="/manual/add">
   <div class="col-md-3">
