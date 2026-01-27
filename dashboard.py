@@ -3,26 +3,71 @@ import subprocess
 import http.client
 import json
 import ipaddress
+import os
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Form
 from fastapi.responses import HTMLResponse, RedirectResponse
 from jinja2 import Template
 
 app = FastAPI()
 
+MANUAL_FILE = "/etc/ap-dashboard/manual_hosts.json"
+
+# ------------------------------------------------------------
+# Manual MAC → IP registry
+# ------------------------------------------------------------
+def load_manual():
+    try:
+        with open(MANUAL_FILE) as f:
+            return json.load(f)
+    except:
+        return {}
+
+
+def save_manual(data):
+    os.makedirs(os.path.dirname(MANUAL_FILE), exist_ok=True)
+    with open(MANUAL_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+
+
+def delete_manual(mac):
+    data = load_manual()
+    mac = mac.lower()
+    if mac in data:
+        del data[mac]
+        save_manual(data)
+
+
+@app.post("/manual/add")
+def manual_add(
+    mac: str = Form(...),
+    ip: str = Form(...),
+    name: str = Form("")
+):
+    data = load_manual()
+    data[mac.lower()] = {
+        "ip": ip.strip(),
+        "name": name.strip()
+    }
+    save_manual(data)
+    return RedirectResponse("/", status_code=302)
+
+
+@app.get("/manual/delete/{mac}")
+def manual_delete(mac: str):
+    delete_manual(mac)
+    return RedirectResponse("/", status_code=302)
+
+
 # ------------------------------------------------------------
 # Kick STA
 # ------------------------------------------------------------
 def kick_client(mac):
-    try:
-        subprocess.run(
-            ["hostapd_cli", "-p", "/run/hostapd", "deauthenticate", mac],
-            capture_output=True,
-            text=True
-        )
-        return True
-    except:
-        return False
+    subprocess.run(
+        ["hostapd_cli", "-p", "/run/hostapd", "deauthenticate", mac],
+        capture_output=True,
+        text=True
+    )
 
 
 @app.get("/kick/{mac}")
@@ -107,8 +152,10 @@ def get_leases():
     try:
         with open("/var/lib/misc/dnsmasq.leases") as f:
             for l in f:
-                _, mac, ip, hostname, _ = l.strip().split(" ")
-                leases[mac.lower()] = {"ip": ip, "hostname": hostname}
+                parts = l.strip().split()
+                if len(parts) >= 4:
+                    _, mac, ip, hostname = parts[:4]
+                    leases[mac.lower()] = {"ip": ip, "hostname": hostname}
     except:
         pass
     return leases
@@ -128,24 +175,32 @@ def ip_sort_key(c):
 def dashboard():
     stas = get_sta()
     leases = get_leases()
+    manual = load_manual()
     rows = []
 
     for c in stas:
         mac = c["mac"].lower()
         lease = leases.get(mac, {})
-        ip = lease.get("ip", "-")
+        manual_entry = manual.get(mac)
 
-        name = get_shelly_name_via(ip) or lease.get("hostname", "-")
+        if manual_entry:
+            ip = manual_entry.get("ip", "-")
+            name = manual_entry.get("name") or get_shelly_name_via(ip) or "-"
+            source = "manual"
+        else:
+            ip = lease.get("ip", "-")
+            name = get_shelly_name_via(ip) or lease.get("hostname", "-")
+            source = "dhcp"
 
         c.update({
             "ip": ip,
             "hostname": name,
-            "type": "sta"
+            "type": "sta",
+            "source": source
         })
 
         rows.append(c)
 
-        # ----- Extender clients -----
         if ip != "-" and is_range_extender(ip):
             for cl in get_extender_clients(ip):
                 host = f"{ip}:{cl['mport']}"
@@ -159,7 +214,8 @@ def dashboard():
                     "rx_bytes": "",
                     "tx_bytes": "",
                     "connected_time": cl["since"],
-                    "type": "ext"
+                    "type": "ext",
+                    "source": "ext"
                 })
 
     rows.sort(key=ip_sort_key)
@@ -168,14 +224,37 @@ def dashboard():
 <!DOCTYPE html>
 <html>
 <head>
-<meta http-equiv="refresh" content="5"/>
 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
 <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.1/font/bootstrap-icons.css" rel="stylesheet">
 <title>AP Dashboard</title>
 </head>
+<script>
+setInterval(() => {
+  if (!document.querySelector(":focus")) {
+    window.location.reload();
+  }
+}, 5000);
+</script>
 <body class="bg-light">
 <div class="container py-4">
 <h2>Access Point Dashboard</h2>
+
+<form class="row g-2 mb-3" method="post" action="/manual/add">
+  <div class="col-md-3">
+    <input class="form-control" name="mac" placeholder="MAC" required>
+  </div>
+  <div class="col-md-2">
+    <input class="form-control" name="ip" placeholder="IP address" required>
+  </div>
+  <div class="col-md-3">
+    <input class="form-control" name="name" placeholder="Device name">
+  </div>
+  <div class="col-md-2">
+    <button class="btn btn-success w-100">
+      <i class="bi bi-plus-circle"></i> Add
+    </button>
+  </div>
+</form>
 
 <table class="table table-striped table-hover align-middle">
 <thead class="table-dark">
@@ -185,6 +264,7 @@ def dashboard():
 <th>Device Name</th>
 <th class="text-center">Web</th>
 <th class="text-center">Kick</th>
+<th class="text-center">Manual</th>
 <th>Signal</th>
 <th>RX</th>
 <th>TX</th>
@@ -209,6 +289,15 @@ def dashboard():
 {% if c.type == 'sta' %}
 <a class="btn btn-outline-danger btn-sm" href="/kick/{{ c.mac }}">
 <i class="bi bi-x-circle"></i>
+</a>
+{% endif %}
+</td>
+
+<td class="text-center">
+{% if c.source == "manual" %}
+<a class="btn btn-outline-secondary btn-sm"
+   href="/manual/delete/{{ c.mac }}">
+<i class="bi bi-trash"></i>
 </a>
 {% endif %}
 </td>
